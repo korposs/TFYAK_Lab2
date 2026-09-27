@@ -8,8 +8,10 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction, QIcon, QKeySequence, QPalette
-from PySide6.QtWidgets import QApplication, QFileDialog, QMainWindow, QMessageBox, QPlainTextEdit, QSplitter, QStyleFactory, QToolBar
+from PySide6.QtGui import QAction, QIcon, QKeySequence, QPalette, QColor, QBrush
+from PySide6.QtWidgets import QApplication, QFileDialog, QMainWindow, QMessageBox, QPlainTextEdit, QSplitter, QStyleFactory, QToolBar, QTableWidget, QTableWidgetItem
+
+from compiler.scanner import Scanner
 
 APP_TITLE = "Текстовый редактор"
 ICONS_DIR = Path(__file__).parent / "resources" / "icons"
@@ -34,14 +36,18 @@ class MainWindow(QMainWindow):
         self.editor = QPlainTextEdit()
         self.editor.setPlaceholderText("Введите исходный текст...")
 
-        self.output = QPlainTextEdit()
-        self.output.setPlaceholderText("Здесь будут отображаться результаты работы языкового процессора...")
-        self.output.setReadOnly(True)
+        self.result_table = QTableWidget()
+        self.result_table.setColumnCount(4)
+        self.result_table.setHorizontalHeaderLabels(["Код", "Тип", "Лексема", "Местоположение"])
+        self.result_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.result_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.result_table.horizontalHeader().setStretchLastSection(True)
+        self.result_table.itemClicked.connect(self._on_table_clicked)
 
         splitter = QSplitter(Qt.Orientation.Vertical)
         splitter.addWidget(self.editor)
-        splitter.addWidget(self.output)
-        splitter.setSizes([500, 200])
+        splitter.addWidget(self.result_table)
+        splitter.setSizes([400, 300])
         splitter.setChildrenCollapsible(False)
 
         self.setCentralWidget(splitter)
@@ -284,7 +290,94 @@ class MainWindow(QMainWindow):
             self.setWindowTitle(APP_TITLE)
 
     def _on_run(self):
-        self.output.setPlainText("Анализатор пока не реализован.")
+        text = self.editor.toPlainText()
+        scanner = Scanner()
+        tokens, errors = scanner.scan(text)
+
+        self.result_table.setRowCount(0)
+
+        for token in tokens:
+            if token.type == "UNKNOWN":
+                continue
+            row = self.result_table.rowCount()
+            self.result_table.insertRow(row)
+            self.result_table.setItem(row, 0, QTableWidgetItem(str(token.code)))
+            self.result_table.setItem(row, 1, QTableWidgetItem(token.type))
+            self.result_table.setItem(row, 2, QTableWidgetItem(self._display_lexeme(token)))
+            self.result_table.setItem(row, 3, QTableWidgetItem(f"строка {token.line}, [{token.start}:{token.end}]"))
+
+        red_bg = QColor(255, 220, 220)
+        red_fg = QColor(180, 0, 0)
+
+        for error in errors:
+            row = self.result_table.rowCount()
+            self.result_table.insertRow(row)
+
+            code_item = QTableWidgetItem("99")
+            type_item = QTableWidgetItem("ОШИБКА")
+            lexeme = error.character
+            if lexeme.isspace():
+                lexeme = "(пробел)" if lexeme == " " else "(пробелы)"
+            lexeme_item = QTableWidgetItem(lexeme)
+            location_item = QTableWidgetItem(f"строка {error.line}, [{error.col}:{error.col}]")
+
+            for item in (code_item, type_item, lexeme_item, location_item):
+                item.setBackground(QBrush(red_bg))
+                item.setForeground(QBrush(red_fg))
+
+            self.result_table.setItem(row, 0, code_item)
+            self.result_table.setItem(row, 1, type_item)
+            self.result_table.setItem(row, 2, lexeme_item)
+            self.result_table.setItem(row, 3, location_item)
+
+        total_lexemes = len([t for t in tokens if t.type != "UNKNOWN"])
+        total_errors = len(errors)
+
+        row = self.result_table.rowCount()
+        self.result_table.insertRow(row)
+        summary = QTableWidgetItem(f"Итого: лексем - {total_lexemes}, ошибок - {total_errors}")
+        font = summary.font()
+        font.setBold(True)
+        summary.setFont(font)
+        summary.setBackground(QBrush(QColor(230, 230, 230)))
+        self.result_table.setItem(row, 0, summary)
+        self.result_table.setSpan(row, 0, 1, 4)
+
+        self.statusBar().showMessage(f"Лексем: {total_lexemes}, ошибок: {total_errors}")
+
+    def _display_lexeme(self, token):
+        if token.type == "WHITESPACE":
+            if "\t" in token.lexeme:
+                return "(табуляция)"
+            return "(пробел)"
+        return token.lexeme
+
+    def _on_table_clicked(self, item):
+        row = item.row()
+        location_item = self.result_table.item(row, 3)
+        if not location_item:
+            return
+
+        text = location_item.text()
+        import re
+        m = re.match(r"строка (\d+), \[(\d+):(\d+)\]", text)
+        if not m:
+            return
+
+        line_num = int(m.group(1))
+        start_col = int(m.group(2))
+        end_col = int(m.group(3))
+
+        cursor = self.editor.textCursor()
+        cursor.movePosition(cursor.MoveOperation.Start)
+        for _ in range(line_num - 1):
+            cursor.movePosition(cursor.MoveOperation.Down)
+
+        cursor.movePosition(cursor.MoveOperation.Right, cursor.MoveMode.MoveAnchor, start_col - 1)
+        cursor.movePosition(cursor.MoveOperation.Right, cursor.MoveMode.KeepAnchor, end_col - start_col + 1)
+
+        self.editor.setTextCursor(cursor)
+        self.editor.setFocus()
 
     def _on_show_text_info(self, title, text):
         QMessageBox.information(self, title, text)
